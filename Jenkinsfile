@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         // Docker Hub Configuration
-        DOCKER_HUB_REPO = 'pedinephro/vital-signs-service'
+        DOCKER_HUB_REPO = 'azizos07/vital-signs-service'
         DOCKER_HUB_CREDS = credentials('dockerhub-creds')
 
         // Build Configuration
