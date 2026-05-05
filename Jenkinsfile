@@ -2,45 +2,74 @@ pipeline {
     agent any
 
     environment {
-        // Docker Hub Configuration
         DOCKER_HUB_REPO = 'azizos07/vital-signs-service'
-        DOCKER_HUB_CREDS = credentials('dockerhub-creds')
-
-        // Build Configuration
-        JAVA_VERSION = '17'
-        MAVEN_VERSION = '3.9.0'
         SERVICE_NAME = 'vital-signs-service'
-        SERVICE_PORT = '8084'
+        SONAR_HOST = 'http://172.17.0.2:9000'
+        MYSQL_CONTAINER = "test-mysql-${BUILD_NUMBER}"
+        MYSQL_PORT = '3310'
+        MYSQL_DATABASE = 'testdb'
+        MYSQL_ROOT_PASSWORD = 'root'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
-                echo "=== Cloning Repository ==="
                 checkout scm
-                sh 'git log -1 --pretty=format:"%H %s"'
             }
         }
 
         stage('Build') {
             steps {
-                echo "=== Building with Maven ==="
-                sh '''
-                    mvn clean package -DskipTests \
-                        -Dmaven.compiler.source=17 \
-                        -Dmaven.compiler.target=17
-                '''
+                sh 'mvn clean package -DskipTests'
             }
         }
 
+        stage('Start Test MySQL') {
+    steps {
+        sh """
+            docker run -d \
+                --name ${MYSQL_CONTAINER} \
+                -e MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD} \
+                -e MYSQL_DATABASE=${MYSQL_DATABASE} \
+                -e MYSQL_ROOT_HOST='%' \
+                -p ${MYSQL_PORT}:3306 \
+                mysql:8
+
+            echo "Waiting for MySQL port to be reachable..."
+            for i in \$(seq 1 60); do
+                if docker run --rm --network host mysql:8 mysqladmin ping \
+                    -h 127.0.0.1 \
+                    -P ${MYSQL_PORT} \
+                    -u root \
+                    -p${MYSQL_ROOT_PASSWORD} \
+                    --silent 2>/dev/null; then
+                    echo "MySQL is ready after \${i} seconds"
+                    break
+                fi
+                if [ \$i -eq 60 ]; then
+                    echo "=== MySQL container logs ==="
+                    docker logs ${MYSQL_CONTAINER}
+                    echo "MySQL failed to start in 60 seconds"
+                    exit 1
+                fi
+                echo "Waiting... (\${i}/60)"
+                sleep 2
+            done
+        """
+    }
+}
+
         stage('Unit Tests') {
             steps {
-                echo "=== Running Unit Tests ==="
-                sh '''
+                sh """
                     mvn test \
-                        -Dtest=**/*Test.class \
-                        -Dgroups!="integration"
-                '''
+                        -Dspring.datasource.url=jdbc:mysql://localhost:${MYSQL_PORT}/${MYSQL_DATABASE} \
+                        -Dspring.datasource.username=root \
+                        -Dspring.datasource.password=${MYSQL_ROOT_PASSWORD} \
+                        -Dspring.jpa.hibernate.ddl-auto=create-drop \
+                        -Dspring.jpa.database-platform=org.hibernate.dialect.MySQL8Dialect
+                """
             }
             post {
                 always {
@@ -50,43 +79,47 @@ pipeline {
         }
 
         stage('SonarQube Analysis') {
-            when {
-                branch 'main'
-            }
             steps {
-                echo "=== Code Quality Analysis ==="
-                sh '''
-                    mvn sonar:sonar \
-                        -Dsonar.projectKey=vital-signs-service \
-                        -Dsonar.host.url=http://sonarqube:9000 \
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh """
+                        mvn sonar:sonar \
+                        -Dsonar.projectKey=${SERVICE_NAME} \
+                        -Dsonar.projectName=${SERVICE_NAME} \
+                        -Dsonar.host.url=${SONAR_HOST} \
                         -Dsonar.login=${SONAR_TOKEN}
-                '''
+                    """
+                }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                echo "=== Building Docker Image ==="
-                script {
-                    sh '''
-                        docker build -t ${DOCKER_HUB_REPO}:${BUILD_NUMBER} .
-                        docker tag ${DOCKER_HUB_REPO}:${BUILD_NUMBER} ${DOCKER_HUB_REPO}:latest
-                    '''
-                }
+                sh """
+                    docker build -t ${DOCKER_HUB_REPO}:${BUILD_NUMBER} .
+                    docker tag ${DOCKER_HUB_REPO}:${BUILD_NUMBER} ${DOCKER_HUB_REPO}:latest
+                """
             }
         }
 
         stage('Push to Docker Hub') {
             steps {
-                echo "=== Pushing Image to Docker Hub ==="
-                script {
-                    sh '''
-                        echo $DOCKER_HUB_CREDS_PSW | docker login -u $DOCKER_HUB_CREDS_USR --password-stdin
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh """
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
                         docker push ${DOCKER_HUB_REPO}:${BUILD_NUMBER}
                         docker push ${DOCKER_HUB_REPO}:latest
                         docker logout
-                    '''
+                    """
                 }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                sh """
+                    docker stop ${MYSQL_CONTAINER} || true
+                    docker rm ${MYSQL_CONTAINER} || true
+                """
             }
         }
     }
@@ -94,15 +127,12 @@ pipeline {
     post {
         success {
             echo "✅ Pipeline SUCCESS"
-            // Send notification
         }
         failure {
             echo "❌ Pipeline FAILED"
-            // Send notification
         }
         always {
-            sh 'docker logout'
-            cleanWs()
+            sh 'docker logout || true'
         }
     }
 }

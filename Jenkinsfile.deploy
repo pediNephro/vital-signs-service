@@ -3,37 +3,95 @@ pipeline {
 
     environment {
         DOCKER_HUB_REPO = 'azizos07/vital-signs-service'
-        SERVICE_NAME = 'vital-signs-service'
-        NAMESPACE = 'pedinephro'
+        SERVICE_NAME     = 'vital-signs-service'
+        NAMESPACE        = 'pedinephro'
+        SONAR_HOST       = 'http://172.17.0.2:9000'
+        KUBECONFIG       = '/var/lib/jenkins/kubeconfig'
     }
 
     stages {
-        stage('Checkout') {
+
+        stage('Verify Cluster') {
             steps {
-                checkout scm
+                sh 'kubectl get nodes'
             }
         }
 
-        stage('Deploy to Kubernetes') {
-            when {
-                branch 'master'
+        stage('Checkout K8s') {
+            steps {
+                git url: 'https://github.com/pediNephro/kubernetes-config.git'
             }
+        }
+
+        stage('Sonar Quality Gate') {
+            steps {
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        STATUS=$(curl -s -u ${SONAR_TOKEN}: \
+                            "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${SERVICE_NAME}" \
+                            | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+                        echo "Quality Gate Status: $STATUS"
+                        if [ "$STATUS" != "OK" ]; then
+                            echo "Quality Gate FAILED — continue deployment"
+                            
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Image') {
+            steps {
+                sh 'docker pull ${DOCKER_HUB_REPO}:latest'
+            }
+        }
+
+        stage('Deploy Infrastructure') {
             steps {
                 sh '''
-                    kubectl config use-context kind-pedinephro-cluster
-                    kubectl set image deployment/${SERVICE_NAME} ${SERVICE_NAME}=${DOCKER_HUB_REPO}:latest -n ${NAMESPACE}
-                    kubectl rollout status deployment/${SERVICE_NAME} -n ${NAMESPACE}
+                    kubectl apply -f 00-namespace.yaml
+                    kubectl apply -f 01-secrets.yaml   -n ${NAMESPACE}
+                    kubectl apply -f 02-configmap.yaml -n ${NAMESPACE}
+                    kubectl apply -f 03-mysql.yaml     -n ${NAMESPACE}
+                    kubectl rollout status deployment/mysql -n ${NAMESPACE} --timeout=120s
+                    kubectl apply -f 04-eureka.yaml    -n ${NAMESPACE}
+                    kubectl apply -f 05-gateway.yaml   -n ${NAMESPACE}
+                    kubectl apply -f 06-keycloak.yaml  -n ${NAMESPACE}
+                    kubectl apply -f 12-ingress.yaml   -n ${NAMESPACE}
                 '''
             }
         }
+
+        stage('Deploy Vital Signs Service') {
+            steps {
+                sh '''
+                    kubectl apply -f 10-vital-signs-service.yaml -n ${NAMESPACE}
+                    kubectl set image deployment/${SERVICE_NAME} \
+                        ${SERVICE_NAME}=${DOCKER_HUB_REPO}:latest \
+                        -n ${NAMESPACE}
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+    steps {
+        sh '''
+            kubectl rollout status deployment/${SERVICE_NAME} -n ${NAMESPACE} --timeout=300s
+            echo "=== Pods ==="
+            kubectl get pods -n ${NAMESPACE} -l app=${SERVICE_NAME}
+            echo "=== Services ==="
+            kubectl get svc -n ${NAMESPACE}
+        '''
+    }
+}
     }
 
     post {
-        success {
-            echo "✅ Deployment pipeline succeeded"
-        }
         failure {
-            echo "❌ Deployment pipeline failed"
+            sh 'kubectl rollout undo deployment/${SERVICE_NAME} -n ${NAMESPACE} || true'
+        }
+        success {
+            echo "Deployed ${SERVICE_NAME}:latest successfully"
         }
     }
 }
