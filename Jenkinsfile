@@ -64,15 +64,16 @@ pipeline {
             steps {
                 sh """
                     mvn test \
+                        -Dspring.profiles.active=test \
                         -Dspring.datasource.url=jdbc:mysql://localhost:${MYSQL_PORT}/${MYSQL_DATABASE} \
                         -Dspring.datasource.username=root \
                         -Dspring.datasource.password=${MYSQL_ROOT_PASSWORD} \
                         -Dspring.jpa.hibernate.ddl-auto=create-drop \
                         -Dspring.jpa.database-platform=org.hibernate.dialect.MySQL8Dialect \
-                        -Deureka.client.enabled=false \
-                        -Dspring.security.oauth2.resourceserver.jwt.jwk-set-uri=http://localhost
+                        -Deureka.client.enabled=false
                 """
             }
+        }
             post {
                 always {
                     junit 'target/surefire-reports/**/*.xml'
