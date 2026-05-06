@@ -4,15 +4,12 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password:
-
   jpa:
     hibernate:
       ddl-auto: create-drop
+  main:
+    allow-bean-definition-overriding: true
 
 eureka:
   client:
     enabled: false
-
-spring:
-  main:
-    allow-bean-definition-overriding: true
