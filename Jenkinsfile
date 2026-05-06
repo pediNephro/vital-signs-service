@@ -73,7 +73,7 @@ pipeline {
                         -Deureka.client.enabled=false
                 """
             }
-        }
+        
             post {
                 always {
                     junit 'target/surefire-reports/**/*.xml'
